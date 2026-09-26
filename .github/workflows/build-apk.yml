@@ -1,4 +1,4 @@
-name: Build APK Auto Update
+name: APK Update Diagnose
 
 on:
   push:
@@ -6,51 +6,22 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  diagnose:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Android-Projekt sauber entpacken
+      - name: Android-Projekt entpacken
         run: |
           rm -rf app build .gradle
           unzip -o ll-solution-android-source.zip
 
-      - name: Auto-Update exakt aktivieren
+      - name: Paket und Version anzeigen
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path("app/src/main/java/de/llsolution/app/MainActivity.java")
-          s = p.read_text(encoding="utf-8")
-
-          old_url = 'private static final String APP_URL = "https://ll-solutions-app.netlify.app/?v=6135";'
-          new_url = 'private static final String APP_URL = "https://ll-solutions-app.netlify.app/";'
-
-          if old_url not in s:
-              raise SystemExit("Erwartete V6.13-URL nicht gefunden – sicherer Abbruch.")
-
-          s = s.replace(old_url, new_url, 1)
-
-          old_ua = 'settings.setUserAgentString(settings.getUserAgentString() + " LLSolutionAndroid/6.13");'
-          new_ua = 'settings.setUserAgentString(settings.getUserAgentString() + " LLSolutionAndroid");'
-          if old_ua in s:
-              s = s.replace(old_ua, new_ua, 1)
-
-          marker = "settings.setMediaPlaybackRequiresUserGesture(false);"
-          cache_line = "settings.setCacheMode(WebSettings.LOAD_DEFAULT);"
-          if cache_line not in s:
-              if marker not in s:
-                  raise SystemExit("WebSettings-Marker nicht gefunden – sicherer Abbruch.")
-              s = s.replace(marker, marker + "\n        " + cache_line, 1)
-
-          p.write_text(s, encoding="utf-8")
-          PY
-
-          grep -n 'APP_URL\|setCacheMode\|LLSolutionAndroid' app/src/main/java/de/llsolution/app/MainActivity.java
-          grep -q 'private static final String APP_URL = "https://ll-solutions-app.netlify.app/";' app/src/main/java/de/llsolution/app/MainActivity.java
-          grep -q 'setCacheMode(WebSettings.LOAD_DEFAULT)' app/src/main/java/de/llsolution/app/MainActivity.java
-          ! grep -q '?v=6135' app/src/main/java/de/llsolution/app/MainActivity.java
+          echo "===== APP BUILD CONFIG ====="
+          cat app/build.gradle.kts
+          echo "===== MANIFEST ====="
+          cat app/src/main/AndroidManifest.xml
 
       - uses: actions/setup-java@v4
         with:
@@ -61,16 +32,16 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: APK sauber neu bauen
+      - name: APK neu bauen
         run: gradle --no-daemon clean assembleDebug
 
-      - name: APK kontrollieren
+      - name: APK Identitaet und Signatur pruefen
         run: |
-          test -f app/build/outputs/apk/debug/app-debug.apk
-          unzip -t app/build/outputs/apk/debug/app-debug.apk
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: LL-Solution-AUTO-UPDATE-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          echo "===== APK DATEI ====="
+          ls -lh "$APK"
+          echo "===== APK SIGNATUR ====="
+          $ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner verify --verbose --print-certs "$APK"
+          echo "===== APK PACKAGE/VERSION ====="
+          $ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/aapt dump badging "$APK" | head -5
