@@ -1,64 +1,33 @@
-name: Build APK Auto Update V7 Wrapper
+name: Signatur Vergleich
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  actions: read
+  contents: read
+
 jobs:
-  build:
+  compare:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Android-Projekt sauber entpacken
+      - name: Alte funktionierende APK aus Build 2 laden
+        run: |
+          mkdir -p old-apk
+          gh api repos/${{ github.repository }}/actions/artifacts/10884331719/zip > old.zip
+          unzip -o old.zip -d old-apk
+          find old-apk -type f -maxdepth 2 -print
+
+      - name: Aktuelle Android-Quelle entpacken
         run: |
           rm -rf app build .gradle
           unzip -o ll-solution-android-source.zip
-
-      - name: Auto-Update und Wrapper-Version aktivieren
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          main = Path("app/src/main/java/de/llsolution/app/MainActivity.java")
-          s = main.read_text(encoding="utf-8")
-
-          old_url = 'private static final String APP_URL = "https://ll-solutions-app.netlify.app/?v=6135";'
-          new_url = 'private static final String APP_URL = "https://ll-solutions-app.netlify.app/";'
-          if old_url not in s:
-              raise SystemExit("Erwartete V6.13-URL nicht gefunden – sicherer Abbruch.")
-          s = s.replace(old_url, new_url, 1)
-
-          old_ua = 'settings.setUserAgentString(settings.getUserAgentString() + " LLSolutionAndroid/6.13");'
-          new_ua = 'settings.setUserAgentString(settings.getUserAgentString() + " LLSolutionAndroid");'
-          if old_ua in s:
-              s = s.replace(old_ua, new_ua, 1)
-
-          marker = "settings.setMediaPlaybackRequiresUserGesture(false);"
-          cache_line = "settings.setCacheMode(WebSettings.LOAD_DEFAULT);"
-          if cache_line not in s:
-              if marker not in s:
-                  raise SystemExit("WebSettings-Marker nicht gefunden – sicherer Abbruch.")
-              s = s.replace(marker, marker + "\n        " + cache_line, 1)
-
-          main.write_text(s, encoding="utf-8")
-
-          gradle = Path("app/build.gradle.kts")
-          g = gradle.read_text(encoding="utf-8")
-          if 'versionCode = 613' not in g or 'versionName = "6.13"' not in g:
-              raise SystemExit("Erwartete alte Versionsdaten nicht gefunden – sicherer Abbruch.")
-          g = g.replace('versionCode = 613', 'versionCode = 700', 1)
-          g = g.replace('versionName = "6.13"', 'versionName = "7.0-wrapper"', 1)
-          gradle.write_text(g, encoding="utf-8")
-          PY
-
-          grep -n 'APP_URL\|setCacheMode\|LLSolutionAndroid' app/src/main/java/de/llsolution/app/MainActivity.java
-          grep -n 'applicationId\|versionCode\|versionName' app/build.gradle.kts
-          grep -q 'applicationId = "de.llsolution.app"' app/build.gradle.kts
-          grep -q 'versionCode = 700' app/build.gradle.kts
-          grep -q 'versionName = "7.0-wrapper"' app/build.gradle.kts
-          ! grep -q '?v=6135' app/src/main/java/de/llsolution/app/MainActivity.java
 
       - uses: actions/setup-java@v4
         with:
@@ -69,20 +38,34 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: APK sauber neu bauen
+      - name: Aktuelle APK bauen
         run: gradle --no-daemon clean assembleDebug
 
-      - name: APK kontrollieren
+      - name: Signaturen vergleichen
         run: |
-          APK=app/build/outputs/apk/debug/app-debug.apk
-          test -f "$APK"
-          unzip -t "$APK"
+          OLD=$(find old-apk -type f -name '*.apk' | head -1)
+          NEW=app/build/outputs/apk/debug/app-debug.apk
+          test -n "$OLD"
+          test -f "$NEW"
+          APKSIGNER=$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner
           AAPT=$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/aapt
-          "$AAPT" dump badging "$APK" | head -5
-          "$AAPT" dump badging "$APK" | grep -q "package: name='de.llsolution.app' versionCode='700' versionName='7.0-wrapper'"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: LL-Solution-V7-WRAPPER-AUTO-UPDATE
-          path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
+          echo "===== ALTE FUNKTIONIERENDE APK ====="
+          "$AAPT" dump badging "$OLD" | head -3
+          "$APKSIGNER" verify --verbose --print-certs "$OLD"
+
+          echo "===== AKTUELL NEU GEBAUTE APK ====="
+          "$AAPT" dump badging "$NEW" | head -3
+          "$APKSIGNER" verify --verbose --print-certs "$NEW"
+
+          OLD_CERT=$("$APKSIGNER" verify --print-certs "$OLD" | grep -m1 'certificate SHA-256 digest' | sed 's/.*: //')
+          NEW_CERT=$("$APKSIGNER" verify --print-certs "$NEW" | grep -m1 'certificate SHA-256 digest' | sed 's/.*: //')
+
+          echo "===== ERGEBNIS ====="
+          echo "ALT: $OLD_CERT"
+          echo "NEU: $NEW_CERT"
+          if [ "$OLD_CERT" = "$NEW_CERT" ]; then
+            echo "SIGNATUREN_IDENTISCH=JA"
+          else
+            echo "SIGNATUREN_IDENTISCH=NEIN"
+          fi
